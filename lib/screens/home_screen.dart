@@ -14,7 +14,6 @@ class _HomeScreenState extends State<HomeScreen> {
   AppPermissionStatus? _permissionStatus;
   bool _isRequestingPermission = false;
 
-  /// 신체 활동 권한 확인, 요청 및 결과 처리.
   Future<void> _requestActivityRecognitionPermission() async {
     setState(() {
       _isRequestingPermission = true;
@@ -65,7 +64,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('WalkSense')),
+      appBar: AppBar(title: const Text('Walksense')),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(24),

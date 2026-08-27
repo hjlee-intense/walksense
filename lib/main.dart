@@ -11,7 +11,7 @@ class WalksenseApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Walksense',
+      title: 'WalkSense',
       debugShowCheckedModeBanner: false,
       home: const HomeScreen(),
     );
