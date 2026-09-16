@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:walksense/services/permission_service.dart';
+import 'package:walksense/services/walking_detector.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -10,10 +13,52 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   final PermissionService _permissionService = PermissionService();
+  final WalkingDetector _walkingDetector = WalkingDetector();
 
+  /// 보행 상태 구독.
+  StreamSubscription<WalkingStatus>? _walkingSubscription;
+
+  /// 신체 활동 권한 상태.
   AppPermissionStatus? _permissionStatus;
+
+  /// 최근 보행 상태.
+  WalkingStatus? _walkingStatus;
+
+  /// 권한 확인·요청 진행 여부.
   bool _isRequestingPermission = false;
 
+  @override
+  void initState() {
+    super.initState();
+    _isRequestingPermission = true;
+    unawaited(_checkInitialPermission());
+  }
+
+  /// 화면 시작 시 기존 권한을 확인하고, 허용돼 있으면 보행 감지를 시작한다.
+  Future<void> _checkInitialPermission() async {
+    try {
+      final status = await _permissionService.checkActivityRecognition();
+      if (!mounted) return;
+
+      setState(() {
+        _permissionStatus = status;
+      });
+
+      if (status == AppPermissionStatus.granted) {
+        _startWalkingDetection();
+      }
+    } catch (error) {
+      debugPrint('초기 신체 활동 권한 확인 실패: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isRequestingPermission = false;
+        });
+      }
+    }
+  }
+
+  /// 신체 활동 권한을 확인·요청하고, 허용되면 보행 감지를 시작한다.
   Future<void> _requestActivityRecognitionPermission() async {
     setState(() {
       _isRequestingPermission = true;
@@ -32,9 +77,26 @@ class _HomeScreenState extends State<HomeScreen> {
       _isRequestingPermission = false;
     });
 
+    if (status == AppPermissionStatus.granted) {
+      _startWalkingDetection();
+    }
+
     if (status == AppPermissionStatus.permanentlyDenied) {
       _showSettingsSnackBar();
     }
+  }
+
+  /// 보행 상태 스트림 구독 및 감지 시작.
+  void _startWalkingDetection() {
+    _walkingSubscription ??= _walkingDetector.statusStream.listen((status) {
+      if (!mounted) return;
+
+      setState(() {
+        _walkingStatus = status;
+      });
+    });
+
+    _walkingDetector.start();
   }
 
   void _showSettingsSnackBar() {
@@ -61,6 +123,24 @@ class _HomeScreenState extends State<HomeScreen> {
     };
   }
 
+  /// 보행 상태에 따른 안내 문구.
+  String get _walkingMessage {
+    return switch (_walkingStatus) {
+      WalkingStatus.walking => '현재 걷는 중입니다.',
+      WalkingStatus.stopped => '현재 멈춰 있습니다.',
+      WalkingStatus.unknown => '보행 상태를 확인하고 있습니다.',
+      WalkingStatus.unavailable => '보행 센서를 사용할 수 없습니다.',
+      null => '보행 상태를 기다리고 있습니다.',
+    };
+  }
+
+  @override
+  void dispose() {
+    unawaited(_walkingSubscription?.cancel());
+    unawaited(_walkingDetector.dispose());
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -74,13 +154,23 @@ class _HomeScreenState extends State<HomeScreen> {
               const Icon(Icons.directions_walk, size: 80),
               const SizedBox(height: 24),
               Text(_permissionMessage, textAlign: TextAlign.center),
+              if (_permissionStatus == AppPermissionStatus.granted) ...[
+                const SizedBox(height: 12),
+                Text(_walkingMessage, textAlign: TextAlign.center),
+              ],
               const SizedBox(height: 24),
               FilledButton(
-                onPressed: _isRequestingPermission
+                onPressed:
+                    _isRequestingPermission ||
+                        _permissionStatus == AppPermissionStatus.granted
                     ? null
                     : _requestActivityRecognitionPermission,
                 child: Text(
-                  _isRequestingPermission ? '권한 확인 중...' : '보행 감지 준비',
+                  _isRequestingPermission
+                      ? '권한 확인 중...'
+                      : _permissionStatus == AppPermissionStatus.granted
+                      ? '보행 감지 중'
+                      : '보행 감지 준비',
                 ),
               ),
             ],
