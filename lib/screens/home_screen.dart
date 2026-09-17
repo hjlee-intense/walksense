@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:walksense/screens/walking_warning_screen.dart';
 import 'package:walksense/services/permission_service.dart';
 import 'package:walksense/services/walking_detector.dart';
 
@@ -12,6 +13,8 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  final bool _previewWarning = true; // 테스트가 끝나면 false로 변경
+
   final PermissionService _permissionService = PermissionService();
   final WalkingDetector _walkingDetector = WalkingDetector();
 
@@ -23,6 +26,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// 최근 보행 상태.
   WalkingStatus? _walkingStatus;
+
+  /// 경고 화면 표시 여부.
+  bool _showWalkingWarning = false;
+
+  /// 보행이 멈춘 뒤 경고 화면을 닫기 위한 타이머.
+  Timer? _warningDismissTimer;
 
   /// 권한 확인·요청 진행 여부.
   bool _isRequestingPermission = false;
@@ -88,15 +97,47 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// 보행 상태 스트림 구독 및 감지 시작.
   void _startWalkingDetection() {
-    _walkingSubscription ??= _walkingDetector.statusStream.listen((status) {
-      if (!mounted) return;
-
-      setState(() {
-        _walkingStatus = status;
-      });
-    });
+    _walkingSubscription ??= _walkingDetector.statusStream.listen(
+      _handleWalkingStatus,
+    );
 
     _walkingDetector.start();
+  }
+
+  void _handleWalkingStatus(WalkingStatus status) {
+    if (!mounted) return;
+
+    if (status == WalkingStatus.walking) {
+      _warningDismissTimer?.cancel();
+      setState(() {
+        _walkingStatus = status;
+        _showWalkingWarning = true;
+      });
+      return;
+    }
+
+    if (status != WalkingStatus.stopped) {
+      _warningDismissTimer?.cancel();
+      setState(() {
+        _walkingStatus = status;
+        _showWalkingWarning = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _walkingStatus = status;
+    });
+
+    if (_showWalkingWarning && !(_warningDismissTimer?.isActive ?? false)) {
+      _warningDismissTimer = Timer(const Duration(seconds: 2), () {
+        if (!mounted) return;
+
+        setState(() {
+          _showWalkingWarning = false;
+        });
+      });
+    }
   }
 
   void _showSettingsSnackBar() {
@@ -136,6 +177,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _warningDismissTimer?.cancel();
     unawaited(_walkingSubscription?.cancel());
     unawaited(_walkingDetector.dispose());
     super.dispose();
@@ -143,6 +185,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    //if (_previewWarning || _showWalkingWarning) {
+    if (_previewWarning) {
+      return const WalkingWarningScreen();
+    }
+
     return Scaffold(
       appBar: AppBar(title: const Text('Walksense')),
       body: Center(
