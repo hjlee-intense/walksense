@@ -22,7 +22,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// 신체 활동 권한 상태.
   AppPermissionStatus? _permissionStatus;
 
-  /// 다른 앱 위에 경고를 표시하기 위한 오버레이 권한 상태.
+  ///  위에 경고를 표시하기 위한 오버레이 권한 상태.
   AppPermissionStatus? _overlayPermissionStatus;
 
   /// 최근 보행 상태.
@@ -103,7 +103,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       await _refreshOverlayPermission();
       if (_overlayPermissionStatus != AppPermissionStatus.granted) {
         await _permissionService.requestOverlayPermission();
-        if (mounted) _showOverlaySettingsSnackBar();
       }
       _startWalkingDetection();
     }
@@ -139,18 +138,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         action: SnackBarAction(
           label: '설정 열기',
           onPressed: _permissionService.openSettings,
-        ),
-      ),
-    );
-  }
-
-  void _showOverlaySettingsSnackBar() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: const Text('다른 앱 위에도 경고를 표시하려면 "다른 앱 위에 표시" 권한을 허용해 주세요.'),
-        action: SnackBarAction(
-          label: '설정 열기',
-          onPressed: _permissionService.requestOverlayPermission,
         ),
       ),
     );
