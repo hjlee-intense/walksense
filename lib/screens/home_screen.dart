@@ -1,9 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:walksense/screens/walking_warning_screen.dart';
 import 'package:walksense/services/permission_service.dart';
-import 'package:walksense/services/walking_detector.dart';
+import 'package:walksense/services/walking_service.dart';
+import 'package:walksense/widgets/walking_service_controls.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -12,11 +12,9 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  final bool _previewWarning = true; // 테스트가 끝나면 false로 변경
-
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final PermissionService _permissionService = PermissionService();
-  final WalkingDetector _walkingDetector = WalkingDetector();
+  final WalkingService _walkingService = WalkingService();
 
   /// 보행 상태 구독.
   StreamSubscription<WalkingStatus>? _walkingSubscription;
@@ -24,14 +22,11 @@ class _HomeScreenState extends State<HomeScreen> {
   /// 신체 활동 권한 상태.
   AppPermissionStatus? _permissionStatus;
 
+  /// 다른 앱 위에 경고를 표시하기 위한 오버레이 권한 상태.
+  AppPermissionStatus? _overlayPermissionStatus;
+
   /// 최근 보행 상태.
   WalkingStatus? _walkingStatus;
-
-  /// 경고 화면 표시 여부.
-  bool _showWalkingWarning = false;
-
-  /// 보행이 멈춘 뒤 경고 화면을 닫기 위한 타이머.
-  Timer? _warningDismissTimer;
 
   /// 권한 확인·요청 진행 여부.
   bool _isRequestingPermission = false;
@@ -39,8 +34,25 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _isRequestingPermission = true;
     unawaited(_checkInitialPermission());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        _permissionStatus == AppPermissionStatus.granted) {
+      unawaited(_refreshOverlayPermission());
+    }
+  }
+
+  /// 오버레이 권한 설정 화면에서 돌아왔을 때 최신 상태를 다시 확인한다.
+  Future<void> _refreshOverlayPermission() async {
+    final status = await _permissionService.checkOverlayPermission();
+    if (mounted) {
+      setState(() => _overlayPermissionStatus = status);
+    }
   }
 
   /// 화면 시작 시 기존 권한을 확인하고, 허용돼 있으면 보행 감지를 시작한다.
@@ -54,6 +66,7 @@ class _HomeScreenState extends State<HomeScreen> {
       });
 
       if (status == AppPermissionStatus.granted) {
+        await _refreshOverlayPermission();
         _startWalkingDetection();
       }
     } catch (error) {
@@ -87,6 +100,11 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     if (status == AppPermissionStatus.granted) {
+      await _refreshOverlayPermission();
+      if (_overlayPermissionStatus != AppPermissionStatus.granted) {
+        await _permissionService.requestOverlayPermission();
+        if (mounted) _showOverlaySettingsSnackBar();
+      }
       _startWalkingDetection();
     }
 
@@ -96,48 +114,22 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   /// 보행 상태 스트림 구독 및 감지 시작.
+  ///
+  /// 걷기 경고 자체는 [WalkingDetectionService]가 다른 앱 위에도 보이는
+  /// 오버레이로 직접 띄우므로, 여기서는 상태 표시용으로만 스트림을 구독한다.
   void _startWalkingDetection() {
-    _walkingSubscription ??= _walkingDetector.statusStream.listen(
+    _walkingSubscription ??= _walkingService.statusStream.listen(
       _handleWalkingStatus,
     );
 
-    _walkingDetector.start();
+    unawaited(_walkingService.start());
   }
 
   void _handleWalkingStatus(WalkingStatus status) {
     if (!mounted) return;
-
-    if (status == WalkingStatus.walking) {
-      _warningDismissTimer?.cancel();
-      setState(() {
-        _walkingStatus = status;
-        _showWalkingWarning = true;
-      });
-      return;
-    }
-
-    if (status != WalkingStatus.stopped) {
-      _warningDismissTimer?.cancel();
-      setState(() {
-        _walkingStatus = status;
-        _showWalkingWarning = false;
-      });
-      return;
-    }
-
     setState(() {
       _walkingStatus = status;
     });
-
-    if (_showWalkingWarning && !(_warningDismissTimer?.isActive ?? false)) {
-      _warningDismissTimer = Timer(const Duration(seconds: 2), () {
-        if (!mounted) return;
-
-        setState(() {
-          _showWalkingWarning = false;
-        });
-      });
-    }
   }
 
   void _showSettingsSnackBar() {
@@ -147,6 +139,18 @@ class _HomeScreenState extends State<HomeScreen> {
         action: SnackBarAction(
           label: '설정 열기',
           onPressed: _permissionService.openSettings,
+        ),
+      ),
+    );
+  }
+
+  void _showOverlaySettingsSnackBar() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('다른 앱 위에도 경고를 표시하려면 "다른 앱 위에 표시" 권한을 허용해 주세요.'),
+        action: SnackBarAction(
+          label: '설정 열기',
+          onPressed: _permissionService.requestOverlayPermission,
         ),
       ),
     );
@@ -177,19 +181,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
-    _warningDismissTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     unawaited(_walkingSubscription?.cancel());
-    unawaited(_walkingDetector.dispose());
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    //if (_previewWarning || _showWalkingWarning) {
-    if (_previewWarning) {
-      return const WalkingWarningScreen();
-    }
-
     return Scaffold(
       appBar: AppBar(title: const Text('Walksense')),
       body: Center(
@@ -204,6 +202,20 @@ class _HomeScreenState extends State<HomeScreen> {
               if (_permissionStatus == AppPermissionStatus.granted) ...[
                 const SizedBox(height: 12),
                 Text(_walkingMessage, textAlign: TextAlign.center),
+                if (_overlayPermissionStatus != AppPermissionStatus.granted) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    '다른 앱을 쓰는 중에도 경고를 표시하려면 "다른 앱 위에 표시" 권한이 필요합니다.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                  TextButton(
+                    onPressed: () async {
+                      await _permissionService.requestOverlayPermission();
+                    },
+                    child: const Text('오버레이 권한 설정 열기'),
+                  ),
+                ],
               ],
               const SizedBox(height: 24),
               FilledButton(
@@ -220,6 +232,8 @@ class _HomeScreenState extends State<HomeScreen> {
                       : '보행 감지 준비',
                 ),
               ),
+              const SizedBox(height: 24),
+              const WalkingServiceControls(),
             ],
           ),
         ),
