@@ -1,6 +1,9 @@
 package kr.co.intense.walksense
 
 import android.Manifest
+import android.animation.Animator
+import android.animation.AnimatorSet
+import android.animation.Keyframe
 import android.animation.ObjectAnimator
 import android.animation.PropertyValuesHolder
 import android.app.Notification
@@ -29,8 +32,9 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
-import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.LinearInterpolator
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 
@@ -45,21 +49,9 @@ class WalkingDetectionService : Service() {
         getSystemService(WINDOW_SERVICE) as WindowManager
     }
 
-    /**
-     * Flutter가 번들에 포함해 둔 Material Icons 폰트를 그대로 로드해서,
-     * 오버레이의 아이콘이 Icons.directions_walk_rounded와 동일한 모양으로 보이게 한다.
-     */
-    private val materialIconTypeface: Typeface? by lazy {
-        try {
-            Typeface.createFromAsset(assets, MATERIAL_ICONS_FONT_ASSET)
-        } catch (error: Exception) {
-            Log.w(TAG, "Material Icons 폰트를 불러오지 못했습니다.", error)
-            null
-        }
-    }
     private val sensorHandler = Handler(Looper.getMainLooper())
     private var overlayView: View? = null
-    private var overlayPulseAnimator: ObjectAnimator? = null
+    private var overlayPulseAnimator: Animator? = null
     private var hideOverlayRunnable: Runnable? = null
     private var sensorRegistered = false
     private var lastStepTimestampNanos = 0L
@@ -81,7 +73,7 @@ class WalkingDetectionService : Service() {
             if (event.timestamp <= lastStepTimestampNanos) return
             lastStepTimestampNanos = event.timestamp
             sensorHandler.removeCallbacks(checkStopped)
-            // 遅れて届いたイベントで、すでに止まっている人を歩行中に戻さない。
+            // 뒤늦게 도착한 이벤트로 인해, 이미 멈춘 사람을 다시 걷는 중으로 되돌리지 않는다.
             val elapsedMillis =
                 (SystemClock.elapsedRealtimeNanos() - event.timestamp) / 1_000_000
             if (elapsedMillis >= STOP_TIMEOUT_MILLIS) {
@@ -143,7 +135,7 @@ class WalkingDetectionService : Service() {
             isRunning = true
             stateListener?.invoke(true, null)
             startWalkingDetection()
-            // showOverlay() // TODO: 테스트용 - 무조건 오버레이 표시. 확인 후 제거.
+            // showOverlay() // TODO: 테스트용 - 무조건 오버레이 표시
         } catch (error: RuntimeException) {
             Log.e(TAG, "포그라운드 서비스 실행 권한을 확인해 주세요.", error)
             isRunning = false
@@ -280,56 +272,107 @@ class WalkingDetectionService : Service() {
         fun dp(value: Int): Int = (value * density).toInt()
 
         val badgeSize = dp(160)
-        val badge = TextView(this).apply {
-            val iconTypeface = materialIconTypeface
-            if (iconTypeface != null) {
-                typeface = iconTypeface
-                text = String(Character.toChars(MATERIAL_ICON_DIRECTIONS_WALK_ROUNDED))
-                textSize = 72f
-            } else {
-                text = "🚶" // 🚶 (폰트 로드 실패 시 대체)
-                textSize = 64f
-            }
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
+        // 파동이 화면 가로 폭의 80%까지 퍼지도록 최대 배율을 계산한다.
+        val maxPulseScale = (resources.displayMetrics.widthPixels * 0.8f) / badgeSize
+        val badge = ImageView(this).apply {
+            setImageResource(R.drawable.stop)
+            scaleType = ImageView.ScaleType.CENTER_CROP
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#8C1D18"))
+                setColor(Color.parseColor("#D9D9D9")) // 조금 더 어두운 회색
+            }
+            clipToOutline = true
+        }
+        // 여러 원이 시차를 두고 퍼지며 겹치는 느낌을 주기 위한 파동 개수.
+        val pulseRingCount = 2
+        // 퍼지고 사라지는 데 걸리는 시간과, 다음 파동이 시작되기 전 쉬는 시간.
+        val pulseActiveDuration = 2_600L
+        val pulsePauseDuration = 1_400L
+        val pulseCycleDuration = pulseActiveDuration + pulsePauseDuration
+        val pulseActiveFraction = pulseActiveDuration.toFloat() / pulseCycleDuration
+        val badgeContainer = FrameLayout(this).apply {
+            clipChildren = false
+            clipToPadding = false
+            repeat(pulseRingCount) {
+                addView(
+                    View(this@WalkingDetectionService).apply {
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.OVAL
+                            setColor(Color.parseColor("#D9D9D9")) // 배지 배경색과 동일한 회색
+                        }
+                    },
+                    FrameLayout.LayoutParams(badgeSize, badgeSize, Gravity.CENTER),
+                )
+            }
+            addView(badge, FrameLayout.LayoutParams(badgeSize, badgeSize, Gravity.CENTER))
+        }
+        // 이미지는 고정된 채, 원형 배경 여러 개가 시차를 두고 밖으로 퍼지며 옅어지는 파동(ripple) 효과.
+        // 한 주기 안에서 퍼지는 구간(pulseActiveFraction)이 끝나면 쉬는 구간 동안 투명하게 머문다.
+        val pulseRingAnimators = (0 until pulseRingCount).map { index ->
+            val ring = badgeContainer.getChildAt(index)
+            val scaleKeyframes = PropertyValuesHolder.ofKeyframe(
+                View.SCALE_X,
+                Keyframe.ofFloat(0f, 1f),
+                Keyframe.ofFloat(pulseActiveFraction, maxPulseScale),
+                Keyframe.ofFloat(1f, maxPulseScale),
+            )
+            val scaleYKeyframes = PropertyValuesHolder.ofKeyframe(
+                View.SCALE_Y,
+                Keyframe.ofFloat(0f, 1f),
+                Keyframe.ofFloat(pulseActiveFraction, maxPulseScale),
+                Keyframe.ofFloat(1f, maxPulseScale),
+            )
+            // 알파는 퍼지는 구간의 절반까지 불투명함을 유지하다가 서서히 사라지고,
+            // 쉬는 구간 동안은 계속 투명한 상태로 머문다.
+            val alphaKeyframes = PropertyValuesHolder.ofKeyframe(
+                View.ALPHA,
+                Keyframe.ofFloat(0f, 1f),
+                Keyframe.ofFloat(pulseActiveFraction * 0.5f, 1f),
+                Keyframe.ofFloat(pulseActiveFraction, 0f),
+                Keyframe.ofFloat(1f, 0f),
+            )
+            ObjectAnimator.ofPropertyValuesHolder(
+                ring,
+                scaleKeyframes,
+                scaleYKeyframes,
+                alphaKeyframes,
+            ).apply {
+                duration = pulseCycleDuration
+                startDelay = index * (pulseCycleDuration / pulseRingCount)
+                repeatMode = ObjectAnimator.RESTART
+                repeatCount = ObjectAnimator.INFINITE
+                interpolator = LinearInterpolator()
             }
         }
-        overlayPulseAnimator = ObjectAnimator.ofPropertyValuesHolder(
-            badge,
-            PropertyValuesHolder.ofFloat(View.SCALE_X, 0.8f, 1.2f),
-            PropertyValuesHolder.ofFloat(View.SCALE_Y, 0.8f, 1.2f),
-        ).apply {
-            duration = 1_200
-            repeatMode = ObjectAnimator.REVERSE
-            repeatCount = ObjectAnimator.INFINITE
-            interpolator = AccelerateDecelerateInterpolator()
+        overlayPulseAnimator = AnimatorSet().apply {
+            playTogether(*pulseRingAnimators.toTypedArray())
             start()
         }
 
+        // 파동이 badgeContainer의 레이아웃 크기를 넘어 아래로 퍼지므로,
+        // 겹치지 않도록 headline 위쪽에 그 넘친 만큼 여백을 더해준다.
+        val pulseOverflow = ((badgeSize * (maxPulseScale - 1f)) / 2f).toInt()
         val headline = TextView(this).apply {
-            text = "걷는 중에는\n잠시 화면을 멀리해 주세요"
+            text = "보행 중 스마트폰\n사용 주의"
             setTextColor(Color.WHITE)
-            textSize = 22f
+            textSize = 40f
             setTypeface(typeface, Typeface.BOLD)
             gravity = Gravity.CENTER
-            setPadding(0, dp(36), 0, 0)
+            setPadding(0, dp(36) + pulseOverflow, 0, 0)
         }
         val body = TextView(this).apply {
-            text = "고개를 들고 주변을 확인해 주세요.\n휴대폰은 안전한 곳에 멈춘 뒤 사용해 주세요."
+            text = "잠시 걸음을 멈추고\n확인해주세요."
             setTextColor(Color.parseColor("#E6E1E5"))
-            textSize = 16f
+            textSize = 25f
             gravity = Gravity.CENTER
             setPadding(0, dp(16), 0, 0)
         }
         val footer = TextView(this).apply {
-            text = "멈춤이 감지되면 자동으로 돌아갑니다."
+            text = "멈추면 자동으로 이전 화면으로 돌아갑니다."
             setTextColor(Color.parseColor("#CAC4D0"))
-            textSize = 14f
+            textSize = 18f
             gravity = Gravity.CENTER
-            setPadding(0, dp(32), 0, 0)
+            setPadding(dp(32), 0, dp(32), dp(32))
         }
 
         val content = LinearLayout(this).apply {
@@ -338,19 +381,39 @@ class WalkingDetectionService : Service() {
             clipChildren = false
             clipToPadding = false
             setPadding(dp(32), dp(32), dp(32), dp(32))
-            addView(badge, LinearLayout.LayoutParams(badgeSize, badgeSize))
-            addView(headline)
-            addView(body)
-            addView(footer)
+            addView(badgeContainer, LinearLayout.LayoutParams(badgeSize, badgeSize))
+            addView(
+                headline,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(
+                body,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
         }
         return FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#1C1B1F"))
+            setBackgroundColor(Color.parseColor("#F21C1B1F")) // 약 95% 불투명 (5% 정도 비쳐 보임)
+            clipChildren = false
             addView(
                 content,
                 FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.WRAP_CONTENT,
                     Gravity.CENTER,
+                ),
+            )
+            addView(
+                footer,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM,
                 ),
             )
         }
@@ -420,9 +483,5 @@ class WalkingDetectionService : Service() {
         private const val STOP_TIMEOUT_MILLIS = 3_000L
         // 멈춘 직후 다시 걸을 수 있으므로 오버레이 제거를 잠시 유예한다.
         private const val HIDE_OVERLAY_DELAY_MILLIS = 2_000L
-        // Flutter 빌드 산출물에 포함된 Material Icons 폰트 에셋 경로.
-        private const val MATERIAL_ICONS_FONT_ASSET = "flutter_assets/fonts/MaterialIcons-Regular.otf"
-        // Icons.directions_walk_rounded의 코드포인트 (packages/flutter/lib/src/material/icons.dart).
-        private const val MATERIAL_ICON_DIRECTIONS_WALK_ROUNDED = 0xf6bd
     }
 }
